@@ -1,46 +1,99 @@
-from rest_framework.viewsets import ModelViewSet
-from rest_framework.permissions import IsAdminUser, IsAuthenticated
-from rest_framework.decorators import action
-from rest_framework.response import Response
-from django.views.decorators.cache import cache_page
+from rest_framework import viewsets
 from django.utils.decorators import method_decorator
-
+from django.views.decorators.cache import cache_page
 from .models import *
 from .serializers import *
+from .permissions import IsAdminOrReadOnly
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import ValidationError
+from django.db import transaction
 
 
-class CategoryViewSet(ModelViewSet):
+
+
+
+@method_decorator(cache_page(60*5), 'list')
+class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
-    permission_classes = [IsAdminUser]
-
-    @action(detail=True, methods=['get'])
-    def products(self, request, pk=None):
-        products = Product.objects.filter(category_id=pk)
-        serializer = ProductSerializer(products, many=True)
-        return Response(serializer.data)
+    permission_classes = [IsAdminOrReadOnly]
 
 
-@method_decorator(cache_page(60*5), name='list')
-class ProductViewSet(ModelViewSet):
-    queryset = Product.objects.select_related('category').prefetch_related('images', 'comments')
+
+
+@method_decorator(cache_page(60*5), 'list')
+class ProductViewSet(viewsets.ModelViewSet):
+    queryset = Product.objects.select_related('category')
     serializer_class = ProductSerializer
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminOrReadOnly]
 
 
-class OrderViewSet(ModelViewSet):
-    queryset = Order.objects.all()
+
+
+class CategoryProductsViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = ProductSerializer
+
+    def get_queryset(self):
+        return Product.objects.filter(
+            category_id=self.kwargs['category_id']
+        )
+
+
+
+
+class ProductImageViewSet(viewsets.ModelViewSet):
+    queryset = ProductImage.objects.select_related('product')
+    serializer_class = ProductImageSerializer
+
+
+
+
+
+class ProductImagesViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = ProductImageSerializer
+
+    def get_queryset(self):
+        return ProductImage.objects.filter(
+            product_id=self.kwargs['product_id']
+        )
+class OrderViewSet(viewsets.ModelViewSet):
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         return Order.objects.filter(user=self.request.user)
 
+    @transaction.atomic
+    def perform_create(self, serializer):
+        product = serializer.validated_data['product']
+        quantity = serializer.validated_data['quantity']
+
+        if product.quantity < quantity:
+            raise ValidationError(
+                {"detail": "Not enough product in stock"}
+            )
+
+        product.quantity -= quantity
+        product.save()
+
+        serializer.save(user=self.request.user)
+
+
+class CommentViewSet(viewsets.ModelViewSet):
+    serializer_class = CommentSerializer
+
+    def get_queryset(self):
+        return Comment.objects.select_related('user', 'product')
+
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
 
-class CommentViewSet(ModelViewSet):
-    queryset = Comment.objects.all()
+
+class ProductCommentsViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CommentSerializer
-    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Comment.objects.filter(
+            product_id=self.kwargs['product_id']
+        )
